@@ -1,3 +1,30 @@
+'''
+#### 主要类和方法
+
+- **CTR_MPC类**: 主要用于控制连续管状机器人（CTR）的模型预测控制（MPC）。
+  - **__init__**: 初始化管子参数和状态变量。
+  - **reset**: 重置管子状态。
+  - **ode_eq**: 定义CTR的常微分方程。
+  - **ode_solver**: 解决CTR的常微分方程，更新机器人状态。
+  - **cost**: 计算成本函数。
+  - **jac**: 计算成本函数的雅可比矩阵。
+  - **inequality**: 定义关节变量的不等式约束。
+  - **fun_hess_cost**: 计算拉格朗日的Hessian矩阵。
+  - **fun_der_inequality**: 计算不等式约束的梯度。
+  - **fun_der**: 计算成本函数的梯度。
+  - **kk**: 计算KKT条件。
+  - **mat**: 构建优化问题的矩阵。
+  - **backtrack**: 计算步长。
+  - **minimize**: 解决MPC问题。
+  - **solve_mpc**: 通过KKT条件解决MPC问题。
+
+- **main函数**: 定义管子参数，初始化MPC控制器，解决并绘制CTR的状态和期望位置。
+
+这个代码示例展示了如何使用MPC算法来控制连续管状机器人的运动，并通过求解常微分方程来更新机器人的状态。
+'''
+
+
+
 import numpy as np
 from scipy.integrate import solve_ivp
 from Segment import Segment
@@ -11,27 +38,26 @@ from scipy.optimize import minimize
 import time
 from numdifftools import Jacobian, Hessian
 
-
 class CTR_MPC:
-    def __init__(self, tube1, tube2, q, q_0, x_d, Tol):  # method 1,2 ---> bvp and ivp
+    def __init__(self, tube1, tube2, q, q_0, x_d, Tol):  # 方法 1,2 ---> 边值问题和初值问题
         self.accuracy = Tol
         self.eps = 1e-5
         self.q_0 = q_0
         self.x_d = x_d
         self.q = q
         self.tube1, self.tube2, self.q, self.q_0 = tube1, tube2, q.astype(float), q_0.astype(float)
-        # position of tubes' base from template (i.e., s=0)
+        # 管子基座位置（从模板，即s=0开始）
         self.beta = q[0:2] + self.q_0[0:2]
         self.segment = Segment(self.tube1, self.tube2, self.beta)
 
         self.span = np.append([0], self.segment.S)
-        self.r_0 = np.array([0, 0, 0]).reshape(3, 1)  # initial position of robot
-        self.alpha_1_0 = self.q[2] + self.q_0[2]  # initial twist angle for tube 1
+        self.r_0 = np.array([0, 0, 0]).reshape(3, 1)  # 机器人的初始位置
+        self.alpha_1_0 = self.q[2] + self.q_0[2]  # 管子1的初始扭转角
         self.R_0 = np.array(
             [[np.cos(self.alpha_1_0), -np.sin(self.alpha_1_0), 0], [np.sin(self.alpha_1_0), np.cos(self.alpha_1_0), 0],
              [0, 0, 1]]) \
-            .reshape(9, 1)  # initial rotation matrix
-        self.alpha_0 = q[2:].reshape(2, 1) + q_0[2:].reshape(2, 1) - self.alpha_1_0  # initial twist angle for all tubes
+            .reshape(9, 1)  # 初始旋转矩阵
+        self.alpha_0 = q[2:].reshape(2, 1) + q_0[2:].reshape(2, 1) - self.alpha_1_0  # 所有管子的初始扭转角
         self.Length = np.empty(0)
         self.r = np.empty((0, 3))
         self.u_z = np.empty((0, 2))
@@ -43,26 +69,25 @@ class CTR_MPC:
         self.segment = Segment(self.tube1, self.tube2, self.beta)
 
         self.span = np.append([0], self.segment.S)
-        self.r_0 = np.array([0, 0, 0]).reshape(3, 1)  # initial position of robot
-        self.alpha_1_0 = q[2] + self.q_0[2]  # initial twist angle for tube 1
+        self.r_0 = np.array([0, 0, 0]).reshape(3, 1)  # 机器人的初始位置
+        self.alpha_1_0 = q[2] + self.q_0[2]  # 管子1的初始扭转角
         self.R_0 = np.array(
             [[np.cos(self.alpha_1_0), -np.sin(self.alpha_1_0), 0], [np.sin(self.alpha_1_0), np.cos(self.alpha_1_0), 0],
              [0, 0, 1]]) \
-            .reshape(9, 1)  # initial rotation matrix
-        self.alpha_0 = q[2:].reshape(2, 1) + self.q_0[2:].reshape(2, 1) - self.alpha_1_0  # initial twist angle for
-        # all tubes
+            .reshape(9, 1)  # 初始旋转矩阵
+        self.alpha_0 = q[2:].reshape(2, 1) + self.q_0[2:].reshape(2, 1) - self.alpha_1_0  # 所有管子的初始扭转角
         self.Length = np.empty(0)
         self.r = np.empty((0, 3))
         self.u_z = np.empty((0, 2))
         self.alpha = np.empty((0, 2))
 
-    # ordinary differential equations for CTR with 2 tubes
+    # 两根管子的CTR的常微分方程
     def ode_eq(self, s, y, ux_0, uy_0, ei, gj):
-        # 1st element of y is curvature along x for first tube,
-        # 2nd element of y is curvature along y for first tube
-        # next 2 elements of y are curvatures along z, e.g., y= [ u1_z  u2_z]
-        # next 2 elements of y are twist angles, alpha_i
-        # last 12 elements are r (position) and R (orientations), respectively
+        # y的第一个元素是第一根管子沿x方向的曲率，
+        # y的第二个元素是第一根管子沿y方向的曲率
+        # 接下来的两个元素是沿z方向的曲率，例如，y=[ u1_z  u2_z]
+        # 接下来的两个元素是扭转角，alpha_i
+        # 最后12个元素分别是r（位置）和R（方向）
         dydt = np.empty([18, 1])
         tet1 = y[4]
         tet2 = y[5]
@@ -71,16 +96,16 @@ class CTR_MPC:
         R_tet2 = np.array([[np.cos(tet2), -np.sin(tet2), 0], [np.sin(tet2), np.cos(tet2), 0],
                            [0, 0, 1]])
         u2 = R_tet2.transpose() @ np.array([[y[0]], [y[1]], [y[2]]]) + dydt[
-            4] * np.array([[0], [0], [1]])  # Vector of curvature of tube 2
+            4] * np.array([[0], [0], [1]])  # 管子2的曲率向量
         u = np.array([y[0], y[1], y[2], u2[0, 0], u2[1, 0], y[3]])
         u1 = np.array([y[0], y[1], y[2]]).reshape(3, 1)
 
-        # estimating twist curvature and twist angles
+        # 估算扭转曲率和扭转角
         for i in np.argwhere(gj != 0):
             dydt[2 + i] = ((ei[i]) / (gj[i])) * (u[i * 3] * uy_0[i] - u[i * 3 + 1] * ux_0[i])  # ui_z
             dydt[4 + i] = y[2 + i] - y[2]  # alpha_i
 
-        # estimating curvature of first tube along x and y
+        # 估算第一根管子沿x和y方向的曲率
         K_inv = np.diag(np.array([1 / np.sum(ei), 1 / np.sum(ei), 1 / np.sum(gj)]))
         K1 = np.diag(np.array([ei[0], ei[0], gj[0]]))
         K2 = np.diag(np.array([ei[1], ei[1], gj[1]]))
@@ -88,8 +113,8 @@ class CTR_MPC:
                             [0, 0, 1]])
         dR_tet2 = np.array([[-np.sin(tet2), -np.cos(tet2), 0], [np.cos(tet2), -np.sin(tet2), 0],
                             [0, 0, 1]])
-        u_hat1 = np.array([[0, -u1[2], u1[1]], [u1[2], 0, -u1[0]], [-u1[1], u1[0], 0]], dtype=np.float64)
-        u_hat2 = np.array([[0, -u2[2], u2[1]], [u2[2], 0, -u2[0]], [-u2[1], u2[0], 0]], dtype=np.float64)
+        u_hat1 = np.array([[0, -u1[2][0], u1[1][0]], [u1[2][0], 0, -u1[0][0]], [-u1[1][0], u1[0][0], 0]], dtype=np.float64)
+        u_hat2 = np.array([[0, -u2[2][0], u2[1][0]], [u2[2][0], 0, -u2[0][0]], [-u2[1][0], u2[0][0], 0]], dtype=np.float64)
         u_s1 = np.array([ux_0[0], uy_0[0], 0]).reshape(3, 1)
         u_s2 = np.array([ux_0[1], uy_0[1], 0]).reshape(3, 1)
         du = np.zeros((3, 1), dtype=np.float64)
@@ -98,9 +123,9 @@ class CTR_MPC:
         dydt[0] = du[0, 0]
         dydt[1] = du[1, 0]
         R = np.array(
-            [[y[9], y[10], y[11]], [y[12], y[13], y[14]], [y[15], y[16], y[17]]])  # rotation matrix of 1st tube
+            [[y[9], y[10], y[11]], [y[12], y[13], y[14]], [y[15], y[16], y[17]]])  # 管子1的旋转矩阵
 
-        # estimating R and r
+        # 估算R和r
         e3 = np.array([[0.0], [0.0], [1.0]])
         dr = R @ e3
         dR = (R @ u_hat1).ravel()
@@ -128,10 +153,10 @@ class CTR_MPC:
                          self.segment.U_y[1, 0] * np.cos(- self.alpha_0[1, 0]))
         uz_0 = np.array([0.0, 0.0]).reshape(2, 1)
 
-        # reset initial parameters for ode solver
+        # 重置常微分方程求解器的初始参数
         for seg in range(0, len(self.segment.S)):
-            # Initial conditions: 3 initial curvature of tube 1, 3 initial twist for tube 2 and 3, 3 initial angle,
-            # 3 initial position, 9 initial rotation matrix
+            # 初始条件：管子1的3个初始曲率，管子2和3的3个初始扭转，3个初始角度，
+            # 3个初始位置，9个初始旋转矩阵
             y_0 = np.vstack((u1_xy_0, uz_0, self.alpha_0, self.r_0, self.R_0)).ravel()
             s = solve_ivp(lambda s, y: self.ode_eq(s, y, self.segment.U_x[:, seg], self.segment.U_y[:, seg],
                                                    self.segment.EI[:, seg], self.segment.GJ[:, seg]),
@@ -143,15 +168,14 @@ class CTR_MPC:
             self.alpha = np.vstack((self.alpha, ans[:, (4, 5)]))
             self.r = np.vstack((self.r, ans[:, (6, 7, 8)]))
             dtheta2 = ans[-1, 3] - ans[-1, 2]
-            # new boundary conditions for next segment
+            # 为下一个段估算新的边界条件
             uz_0 = self.u_z[-1, :].reshape(2, 1)
             self.r_0 = self.r[-1, :].reshape(3, 1)
             self.R_0 = np.array(ans[-1, 9:]).reshape(9, 1)
             self.alpha_0 = self.alpha[-1, :].reshape(2, 1)
             u1 = ans[-1, (0, 1, 2)].reshape(3, 1)
             if seg < len(
-                    self.segment.S) - 1:  # enforcing continuity of moment to estimate initial curvature for next
-                # segment
+                    self.segment.S) - 1:  # 强制弯矩连续性以估算下一个段的初始曲率
 
                 K1 = np.diag(np.array([self.segment.EI[0, seg], self.segment.EI[0, seg], self.segment.GJ[0, seg]]))
                 K2 = np.diag(np.array([self.segment.EI[1, seg], self.segment.EI[1, seg], self.segment.GJ[1, seg]]))
@@ -182,14 +206,14 @@ class CTR_MPC:
                 u1_xy_0 = u1_new[0:2, 0].reshape(2, 1)
         return
 
-    # cost function, inputs are joint variables q, lagrangian params w, slack vaiables s, desried pos x_d
+    # 成本函数，输入是关节变量q，拉格朗日参数w，松弛变量s，期望位置x_d
     def cost(self, q):
         self.ode_solver(q)
         Error = 1000 * (self.r[-1, :].reshape(3, 1) - self.x_d.reshape(3, 1))
         C = np.sum((Error.T @ Error), axis=0)
         return C
 
-    # Estimating Jacobian of cost function
+    # 估算成本函数的雅可比矩阵
     def jac(self, q):
         jac = np.zeros((4,))
         r = self.cost(q)
@@ -200,24 +224,21 @@ class CTR_MPC:
             q[i] = q[i] - self.eps
         return jac
 
-    # inequality constraints on joint variables
+    # 关节变量的不等式约束
     def inequality(self, q, q0):
         I = np.array([[-q[0] - q0[0]], [-q[1] - q0[1]], [-q[0] - q0[0] + q[1] + q0[1]], [q[0] + q0[0] + 0.4]])
         return I
-        # Hessian of lagrangian
 
+    # 拉格朗日的Hessian矩阵
     def fun_hess_cost(self, q, w, s, x_d, q0):
         return Hessian(lambda q: self.cost(q, w, s, x_d, q0), step=self.eps)(q)
 
-        # Gradient of cost function
-
+    # 成本函数的梯度
     def fun_der_inequality(self, q, q0):
         return Jacobian(lambda q: self.inequality(q, q0), step=self.eps)(q)
 
-        # Gradient of cost function
-
+    # 成本函数的梯度
     def fun_der(self, q, x_d):
-        # dF = Jacobian(lambda q: self.ode_solver(q, x_d), step=self.eps)(q)
         dF = optimize.approx_fprime(q, self.ode_solver, self.eps, x_d)
         return dF.reshape(4, 1)
 
@@ -249,12 +270,15 @@ class CTR_MPC:
             counter += 1
         return alpha
 
-    # Solving the MPC problem
+    # 解决MPC问题
     def minimize(self, q_init, q):
         eps = 0.0001
+        # 限制条件
         ineq_cons = {'type': 'ineq',
-                     'fun': lambda q: np.array([-q[0] - q_init[0] - eps, -q[1] - q_init[1] - eps,
-                                                q[0] + q_init[0] + 0.4 - eps, q[1] + q_init[1] + 0.3,
+                     'fun': lambda q: np.array([-q[0] - q_init[0] - eps,
+                                                -q[1] - q_init[1] - eps,
+                                                q[0] + q_init[0] + 0.4 - eps,
+                                                q[1] + q_init[1] + 0.3,
                                                 q_init[1] - q_init[0] - eps - q[0] + q[1]]),
                      'jac': lambda q: np.array([[-1.0, 0, 0, 0],
                                                 [0, -1.0, 0, 0],
@@ -263,7 +287,7 @@ class CTR_MPC:
                                                 [-1.0, 1.0, 0, 0]])}
 
         res = minimize(self.cost, q, method='SLSQP', jac=self.jac,
-                       constraints=[ineq_cons], options={'ftol': 0.75e-3})
+                       constraints=ineq_cons, options={'ftol': 0.75e-3})
 
         # print(res.x)
         return res.x
@@ -305,22 +329,21 @@ class CTR_MPC:
             Q = np.concatenate((Q, q.reshape(1, 4)), axis=0)
         return Q, C
 
-
 def main():
     start_time = time.time()
 
-    # Defining parameters of each tube, numbering starts with the most inner tube
-    # length, length_curved, diameter_inner, diameter_outer, stiffness, torsional_stiffness, x_curvature, y_curvature
+    # 定义每根管子的参数，从最内层管子开始编号
+    # 参数依次是：长度、弯曲长度、内径、外径、刚度、扭转刚度、X方向弯曲、Y方向弯曲
     tube1 = Tube(400e-3, 200e-3, 2 * 0.35e-3, 2 * 0.55e-3, 70.0e+9, 10.0e+9, 12, 0)
     tube2 = Tube(300e-3, 150e-3, 2 * 0.7e-3, 2 * 0.9e-3, 70.0e+9, 10.0e+9, 6, 0)
-    # Joint variables
+    # 关节变量
     q = np.array([0.0, 0.0, 0.0, 0.0])
-    # Initial position of joints
+    # 关节的初始位置
     q_init = np.array([-300e-3, -200e-3, 0, 0])
-    # initial twist (for ivp solver)
+    # 初始扭转（用于ivp求解器）
     uz_0 = np.array([0.0, 0.0, 0.0])
     u1_xy_0 = np.array([[0.0], [0.0]])
-    # desired pos -7.45336254e-02  1.19058021e-01
+    # 期望位置 -7.45336254e-02  1.19058021e-01
     x_d = np.array([[0 + 1e-3], [-3.32759076e-02 + 0.001], [9.21576565e-02]])
     CTR = CTR_MPC(tube1, tube2, q, q_init, x_d, 0.01)
     CTR.ode_solver(q)
@@ -328,7 +351,7 @@ def main():
     CTR.minimize(q_init, q)
     print(CTR.r[-1, :])
 
-    # plot the robot shape
+    # 绘制机器人的形状
     fig = plt.figure()
     ax = plt.axes(projection='3d')
     ax.plot(CTR.r[:, 0], CTR.r[:, 1], CTR.r[:, 2], '-b', label='CTR Robot')
@@ -344,7 +367,6 @@ def main():
     plt.show()
 
     return
-
 
 if __name__ == "__main__":
     main()
